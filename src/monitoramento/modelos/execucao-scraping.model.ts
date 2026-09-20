@@ -1,0 +1,37 @@
+import { Schema, model } from "mongoose";
+
+const esquemaExecucao = new Schema(
+	{
+		fonte: { type: String, required: true, index: true },
+		categoria: { type: String, index: true },
+		rodadaId: { type: String, index: true },
+		status: { type: String, enum: ["aguardando", "executando", "concluido", "erro"], required: true, index: true },
+		iniciadoEm: { type: Date, required: true, index: true },
+		finalizadoEm: Date,
+		duracaoMs: Number,
+		produtosEncontrados: { type: Number, default: 0 },
+		produtosUnicos: { type: Number, default: 0 },
+		produtosPersistidos: { type: Number, default: 0 },
+		produtosIndexados: { type: Number, default: 0 },
+		produtosNovos: { type: Number, default: 0 },
+		produtosAtualizados: { type: Number, default: 0 },
+		produtosInativados: { type: Number, default: 0 },
+		progresso: {
+			coleta: { type: Number, default: 0 },
+			embeddings: { type: Number, default: 0 },
+			indexacao: { type: Number, default: 0 },
+			geral: { type: Number, default: 0 },
+		},
+		ultimaMensagem: String,
+		erro: String,
+	},
+	{ versionKey: false },
+);
+
+// Impede duas execuções simultâneas para a mesma fonte, inclusive entre processos.
+esquemaExecucao.index(
+	{ fonte: 1, status: 1 },
+	{ unique: true, partialFilterExpression: { status: "executando" } },
+);
+
+export const ModeloExecucaoScraping = model("ExecucaoScraping", esquemaExecucao);

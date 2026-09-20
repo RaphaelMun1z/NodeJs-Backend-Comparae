@@ -1,0 +1,228 @@
+import { AgendadorColeta } from "./agendadores/agendador-coleta.js";
+import { ServidorApi } from "./api/servidor-api.js";
+import { AnalisadorSite } from "./analisadores/analisador-site.js";
+import { ConexaoBanco } from "./banco/conexao-banco.js";
+import { RepositorioItem } from "./banco/repositorios/repositorio-item.js";
+import { ClienteHttp } from "./clientes/cliente-http.js";
+import { ColetorFonteSite } from "./fontes/coletor-fonte-site.js";
+import { configuracaoAplicacao } from "./config/aplicacao.config.js";
+import { logger } from "./config/logger.js";
+import { ServicoColeta } from "./servicos/servico-coleta.js";
+import { ProvedorEmbeddingHttp } from "./embeddings/provedor-embedding-http.js";
+import { ProvedorEmbeddingLocal } from "./embeddings/provedor-embedding-local.js";
+import { criarClienteElasticsearch } from "./elasticsearch/cliente-elasticsearch.js";
+import { RepositorioIndiceProdutos } from "./elasticsearch/repositorio-indice-produtos.js";
+import {
+	configuracaoMatching,
+	validarConfiguracaoMatching,
+} from "./matching/configuracao-matching.js";
+import { ServicoMatchingProduto } from "./matching/servico-matching-produto.js";
+import { ServicoMatchingCatalogoProdutos } from "./matching/servico-matching-catalogo-produtos.js";
+import { ServicoAutenticacao } from "./autenticacao/servico-autenticacao.js";
+import { ServicoConfiguracaoScraping } from "./configuracoes/servico-configuracao-scraping.js";
+import { ServicoEventosScraping } from "./monitoramento/servico-eventos-scraping.js";
+import { ServicoBuscaManual } from "./servicos/servico-busca-manual.js";
+import { ServicoLimpezaProdutos } from "./servicos/servico-limpeza-produtos.js";
+import { ServicoNotificacaoTelegram } from "./notificacoes/servico-notificacao-telegram.js";
+
+async function iniciarAplicacao(): Promise<void> {
+	// Centraliza a composição das dependências compartilhadas pela aplicação.
+	const conexaoBanco = new ConexaoBanco();
+	await conexaoBanco.conectar(configuracaoAplicacao.banco.uri);
+
+	const clienteHttp = new ClienteHttp(
+		configuracaoAplicacao.coleta.tempoLimiteMs,
+		configuracaoAplicacao.coleta.agenteUsuario,
+	);
+
+	const repositorioItem = new RepositorioItem();
+	await repositorioItem.garantirGruposIndividuais();
+	await repositorioItem.removerHistoricoAntigo(
+		configuracaoAplicacao.coleta.historicoRetencaoDias,
+	);
+	const autenticacao = new ServicoAutenticacao();
+	const configuracaoScraping = new ServicoConfiguracaoScraping();
+	const eventosScraping = new ServicoEventosScraping(
+		undefined,
+		undefined,
+		() =>
+			configuracaoScraping
+				.obterFontesAtivas()
+				.then((fontes) => fontes.map((fonte) => fonte.fonte)),
+	);
+	await eventosScraping.prepararRetencao();
+	const configuracaoPersistida =
+		await configuracaoScraping.obterOuCriarPadrao();
+	let servicoMatchingCatalogo: ServicoMatchingCatalogoProdutos | undefined;
+	let clienteElasticsearch:
+		| ReturnType<typeof criarClienteElasticsearch>
+		| undefined;
+	let repositorioIndiceProdutos: RepositorioIndiceProdutos | undefined;
+	if (configuracaoMatching.habilitado) {
+		validarConfiguracaoMatching();
+		clienteElasticsearch = criarClienteElasticsearch();
+		const indice = new RepositorioIndiceProdutos(clienteElasticsearch);
+		repositorioIndiceProdutos = indice;
+		await indice.garantirIndice();
+		const embeddings = configuracaoMatching.embeddingUrl
+			? new ProvedorEmbeddingHttp(
+					configuracaoMatching.embeddingUrl,
+					configuracaoMatching.embeddingModelo,
+					configuracaoMatching.embeddingApiKey,
+				)
+			: new ProvedorEmbeddingLocal(
+					configuracaoMatching.dimensaoEmbedding,
+				);
+		servicoMatchingCatalogo = new ServicoMatchingCatalogoProdutos(
+			indice,
+			embeddings,
+			new ServicoMatchingProduto(indice, embeddings),
+			repositorioItem,
+		);
+	}
+	const criarFontesConfiguradas = (
+		fontesConfiguradas: typeof configuracaoPersistida.fontes,
+	) =>
+		fontesConfiguradas.flatMap((configuracaoFonte) =>
+			configuracaoFonte.categorias
+				.filter(
+					(categoria) => categoria.ativa && Boolean(categoria.url),
+				)
+				.map((categoria) => {
+					const nome = configuracaoFonte.fonte;
+					return new ColetorFonteSite(
+						nome,
+						categoria.categoria,
+						`${nome}:${categoria.id}`,
+						categoria.url,
+						clienteHttp,
+						new AnalisadorSite(),
+						categoria.seletores,
+						async () => {
+							const atualizada =
+								await configuracaoScraping.obterOuCriarPadrao();
+							const fonteAtual = atualizada.fontes.find(
+								(fonte) => fonte.fonte === nome,
+							);
+							const categoriaAtual = fonteAtual?.categorias.find(
+								(item) => item.id === categoria.id,
+							);
+							return categoriaAtual
+								? {
+										url: categoriaAtual.url,
+										seletores: categoriaAtual.seletores,
+									}
+								: undefined;
+						},
+					);
+				}),
+		);
+	const fontes = criarFontesConfiguradas(configuracaoPersistida.fontes);
+	const obterFontesConfiguradas = async () =>
+		criarFontesConfiguradas(
+			(await configuracaoScraping.obterOuCriarPadrao()).fontes,
+		);
+	const notificacaoTelegram = new ServicoNotificacaoTelegram();
+	const servicoColeta = new ServicoColeta(
+		fontes,
+		repositorioItem,
+		configuracaoAplicacao.coleta.salvarColeta,
+		servicoMatchingCatalogo,
+		eventosScraping,
+		() =>
+			configuracaoScraping
+				.obterFontesAtivas()
+				.then((fontes) => fontes.map((fonte) => fonte.fonte)),
+		obterFontesConfiguradas,
+		async (desde) => {
+			const configuracao =
+				await configuracaoScraping.obterOuCriarPadrao();
+			await notificacaoTelegram.notificarProdutos(
+				configuracao.telegram,
+				await repositorioItem.consultarOfertasTelegram(
+					desde,
+					configuracao.telegram.percentualAbaixoMedia,
+				),
+			);
+		},
+	);
+	const servicoBuscaManual = new ServicoBuscaManual(
+		fontes,
+		() =>
+			configuracaoScraping
+				.obterFontesAtivas()
+				.then((fontesAtivas) =>
+					fontesAtivas.map((fonte) => fonte.fonte),
+				),
+		obterFontesConfiguradas,
+	);
+
+	const agendador = new AgendadorColeta(
+		servicoColeta,
+		configuracaoPersistida.agendamento.horarios,
+		configuracaoPersistida.agendamento.fusoHorario,
+	);
+
+	const limpezaProdutos = new ServicoLimpezaProdutos(
+		repositorioItem,
+		repositorioIndiceProdutos,
+	);
+	const servidorApi = new ServidorApi(
+		repositorioItem,
+		conexaoBanco,
+		autenticacao,
+		configuracaoScraping,
+		eventosScraping,
+		() => agendador.obterProximaExecucao(),
+		servicoBuscaManual,
+		repositorioIndiceProdutos,
+		servicoColeta,
+		limpezaProdutos,
+		(agendamento) =>
+			agendador.atualizar(agendamento.horarios, agendamento.fusoHorario),
+	);
+
+	servidorApi.iniciar(configuracaoAplicacao.api.porta);
+	agendador.iniciar();
+
+	if (configuracaoAplicacao.coleta.executarAoIniciar) {
+		// A primeira coleta ocorre sem bloquear a inicialização da API.
+		void servicoColeta.executar().catch((erro) => {
+			logger.error({ erro }, "Erro na coleta inicial");
+		});
+	}
+
+	let encerrando = false;
+
+	const encerrar = async (): Promise<void> => {
+		if (encerrando) return;
+		encerrando = true;
+
+		logger.info("Encerrando aplicação");
+		agendador.parar();
+		await servidorApi.parar();
+		await clienteHttp.fechar();
+		await clienteElasticsearch?.close();
+		await conexaoBanco.desconectar();
+	};
+
+	process.once("SIGINT", () => void encerrar());
+	process.once("SIGTERM", () => void encerrar());
+}
+
+iniciarAplicacao().catch((erro) => {
+	logger.fatal(
+		{
+			erro:
+				erro instanceof Error
+					? {
+							nome: erro.name,
+							mensagem: erro.message,
+							pilha: erro.stack,
+						}
+					: erro,
+		},
+		"Falha ao iniciar a aplicação",
+	);
+	process.exit(1);
+});
