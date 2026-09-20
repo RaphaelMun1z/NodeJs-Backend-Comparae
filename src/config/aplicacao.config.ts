@@ -11,11 +11,8 @@ carregarAmbiente({
 });
 
 const esquemaConfiguracao = z.object({
-	PORTA_API: z.coerce.number().int().positive().default(3000),
-	MONGODB_URI: z
-		.string()
-		.min(1)
-		.default("mongodb://127.0.0.1:27017/scraping_lojas"),
+	PORTA_API: z.coerce.number().int().positive().optional(),
+	MONGODB_URI: z.string().min(1),
 	REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 	USER_AGENT: z
 		.string()
@@ -32,9 +29,17 @@ const esquemaConfiguracao = z.object({
 		.enum(["true", "false"])
 		.default("true")
 		.transform((valor) => valor === "true"),
-	SCRAPING_RETENCAO_EXECUCOES: z.coerce.number().int().positive().default(100),
+	SCRAPING_RETENCAO_EXECUCOES: z.coerce
+		.number()
+		.int()
+		.positive()
+		.default(100),
 	SCRAPING_RETENCAO_LOGS: z.coerce.number().int().positive().default(2000),
-	HISTORICO_PRECO_RETENCAO_DIAS: z.coerce.number().int().nonnegative().default(730),
+	HISTORICO_PRECO_RETENCAO_DIAS: z.coerce
+		.number()
+		.int()
+		.nonnegative()
+		.default(730),
 });
 
 // Valida a configuração na inicialização para falhar cedo com uma mensagem clara.
@@ -42,7 +47,7 @@ const ambiente = esquemaConfiguracao.parse(process.env);
 
 export const configuracaoAplicacao = {
 	api: {
-		porta: ambiente.PORTA_API,
+		porta: Number(process.env.PORT ?? ambiente.PORTA_API ?? 3000),
 	},
 	banco: {
 		uri: ambiente.MONGODB_URI,
@@ -56,7 +61,9 @@ export const configuracaoAplicacao = {
 	},
 	telegram: { botToken: ambiente.TELEGRAM_BOT_TOKEN },
 	agendamento: {
-		horarios: ambiente.HORARIOS_COLETA.split(",").map((horario) => horario.trim()).filter(Boolean),
+		horarios: ambiente.HORARIOS_COLETA.split(",")
+			.map((horario) => horario.trim())
+			.filter(Boolean),
 		fusoHorario: ambiente.CRON_FUSO_HORARIO,
 	},
 } as const;
