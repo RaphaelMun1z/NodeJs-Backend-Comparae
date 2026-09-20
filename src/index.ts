@@ -26,8 +26,11 @@ import { ServicoLimpezaProdutos } from "./servicos/servico-limpeza-produtos.js";
 import { ServicoNotificacaoTelegram } from "./notificacoes/servico-notificacao-telegram.js";
 
 async function iniciarAplicacao(): Promise<void> {
+	logger.info("1 - iniciando");
+
 	// Centraliza a composição das dependências compartilhadas pela aplicação.
 	const conexaoBanco = new ConexaoBanco();
+	logger.info("2 - conectando Mongo");
 	await conexaoBanco.conectar(configuracaoAplicacao.banco.uri);
 
 	const clienteHttp = new ClienteHttp(
@@ -35,7 +38,10 @@ async function iniciarAplicacao(): Promise<void> {
 		configuracaoAplicacao.coleta.agenteUsuario,
 	);
 
+	logger.info("3 - Mongo conectado");
+
 	const repositorioItem = new RepositorioItem();
+	logger.info("4 - preparando repositório");
 	await repositorioItem.garantirGruposIndividuais();
 	await repositorioItem.removerHistoricoAntigo(
 		configuracaoAplicacao.coleta.historicoRetencaoDias,
@@ -61,6 +67,7 @@ async function iniciarAplicacao(): Promise<void> {
 	if (configuracaoMatching.habilitado) {
 		validarConfiguracaoMatching();
 		clienteElasticsearch = criarClienteElasticsearch();
+		logger.info("5 - preparando Elasticsearch");
 		const indice = new RepositorioIndiceProdutos(clienteElasticsearch);
 		repositorioIndiceProdutos = indice;
 		await indice.garantirIndice();
@@ -180,6 +187,11 @@ async function iniciarAplicacao(): Promise<void> {
 		limpezaProdutos,
 		(agendamento) =>
 			agendador.atualizar(agendamento.horarios, agendamento.fusoHorario),
+	);
+
+	logger.info(
+		{ porta: configuracaoAplicacao.api.porta },
+		"6 - iniciando API",
 	);
 
 	servidorApi.iniciar(configuracaoAplicacao.api.porta);
